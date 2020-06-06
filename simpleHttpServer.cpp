@@ -29,7 +29,7 @@ int main()
             closesocket(listenSocket);
         }
     }
-    printf("Bye!\n");
+    printf("Bye bye!\n");
 
     WSACleanup();
 }
