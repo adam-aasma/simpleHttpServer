@@ -7,12 +7,23 @@
 #include <string>
 
 #define DEFAULT_PORT "8088"
+#define DEFAULT_BUFLEN 512
+
+struct SocketData {
+    SOCKET socket;
+    char recvbuf[DEFAULT_BUFLEN];
+    int recvBufOffs = 0;
+};
+
 bool initWinsock(WSAData& wsaData);
 SOCKET acceptClient(SOCKET listenSocket);
 bool startListen(SOCKET listenSocket);
 SOCKET createListenSocket();
 std::string readData(SOCKET clientSocket);
 void sendData(const char* data, SOCKET clientSocket);
+void handleBuffer(SocketData* pSocketData, int);
+bool isBufferComplete(SocketData* pSocketData);
+void resetBuffer(SocketData* pSocketData);
 
 int main()
 {
@@ -41,8 +52,6 @@ void sendData(const char* data, SOCKET clientSocket)
 
 std::string readData(SOCKET clientSocket)
 {
-#define DEFAULT_BUFLEN 512
-
     char recvbuf[DEFAULT_BUFLEN];
     int recvbuflen = DEFAULT_BUFLEN;
     int iOffs = 0;
@@ -58,6 +67,11 @@ std::string readData(SOCKET clientSocket)
     std::string s(recvbuf, iOffs);
 
     return s;
+}
+
+int readData(SOCKET clientSocket, char* recvBuf, int recvBufLen)
+{
+    return recv(clientSocket, recvBuf, recvBufLen, 0);
 }
 
 bool initWinsock(WSAData& wsaData)
@@ -76,8 +90,6 @@ SOCKET acceptClient(SOCKET listenSocket)
     SOCKET clientSocket = accept(listenSocket, NULL, NULL);
     if (clientSocket == INVALID_SOCKET) {
         printf("accept failed: %d\n", WSAGetLastError());
-        //closesocket(ListenSocket);
-        //WSACleanup();
         return INVALID_SOCKET;
     }
     return clientSocket;
@@ -87,11 +99,79 @@ bool startListen(SOCKET listenSocket)
 {
     if (listen(listenSocket, SOMAXCONN) == SOCKET_ERROR) {
         printf("Listen failed with error: %ld\n", WSAGetLastError());
-        //closesocket(listenSocket);
-        //WSACleanup();
         return false;
     }
+    SocketData sockets[64];
+    int noOfSockets = 0;
+    sockets[noOfSockets].socket = listenSocket;
+    noOfSockets++;
+    fd_set readfds;
+    timeval timeOut;
+    timeOut.tv_sec = 10;
+    while (true) {
+        FD_ZERO(&readfds);
+        for (int i = 0; i < noOfSockets; i++) {
+            FD_SET(sockets[i].socket, &readfds);
+        }
+        int noOfSet = select(0, &readfds, NULL, NULL, &timeOut);
+        if (noOfSet == SOCKET_ERROR) {
+            printf("Select failed with error: %ld\n", WSAGetLastError());
+            return false;
+        }
+        if (noOfSet > 0) {
+            for (int i = 0; i < noOfSockets; i++) {
+                if (FD_ISSET(sockets[i].socket, &readfds)) {
+                    if (i == 0) {
+                        SOCKET newClient = acceptClient(listenSocket);
+                        sockets[noOfSockets].socket = newClient;
+                        sockets[noOfSockets].recvBufOffs = 0;
+                        noOfSockets++;
+                    }
+                    else {
+                        SocketData* s = sockets + i;
+                        int iResult = readData(s->socket, s->recvbuf + s->recvBufOffs, DEFAULT_BUFLEN - s->recvBufOffs);
+                        if (!iResult) {
+                            if (i + 1 < noOfSockets) {
+                                int byteSize = sizeof(SocketData);
+                                void* dest = ((char*)sockets) + i * byteSize;
+                                void* src = ((char*)sockets) + (i + 1) * byteSize;
+                                size_t totSize = (noOfSockets - (i + 1)) * sizeof(SocketData);
+
+                                memmove(dest, src, totSize);
+                            }
+                            noOfSockets--;
+                        }
+                        else {
+                            handleBuffer(s, iResult);
+                            if (isBufferComplete(s)) {
+                                for (int j = 1; j < noOfSockets; j++) {
+                                    sendData(s->recvbuf, sockets[j].socket);
+                                }
+                                resetBuffer(s);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     return true;
+}
+
+void handleBuffer(SocketData* pSocketData, int dataRead)
+{
+    pSocketData->recvBufOffs += dataRead;
+    pSocketData->recvbuf[pSocketData->recvBufOffs] = 0;
+}
+
+bool isBufferComplete(SocketData* pSocketData)
+{
+    return strstr(pSocketData->recvbuf, "\n");
+}
+
+void resetBuffer(SocketData* pSocketData)
+{
+    pSocketData->recvBufOffs = 0;
 }
 
 SOCKET createListenSocket()
